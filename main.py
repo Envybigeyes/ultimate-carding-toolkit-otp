@@ -1,6 +1,8 @@
 # main.py
 from ui import router as ui_router
 from scripts import SCRIPTS
+from storage import call_logs, dtmf_logs
+from ui import router as ui_router
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 import uuid, random, time, os, csv, io
