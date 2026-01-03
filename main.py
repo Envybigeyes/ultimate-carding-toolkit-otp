@@ -76,6 +76,7 @@ async def fraud_trigger(data: dict):
 # --- Manual fraud trigger ---
 @app.post("/fraud/manual-call")
 async def manual_call(data: dict, request: Request):
+    require_role(request, "admin")
     key = request.headers.get("X-Internal-Key")
     if key != os.getenv("INTERNAL_KEY"):
         return {"error": "unauthorized"}
