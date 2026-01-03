@@ -1,15 +1,26 @@
 # auth.py
-
 import os
-from fastapi import HTTPException, Request
+from fastapi import Request, HTTPException
 
 def require_role(request: Request, role: str):
-    token = request.headers.get("X-Auth-Token")
+    """
+    Roles:
+    - admin → X-Auth-Token header
+    - agent → session cookie
+    """
 
     if role == "admin":
+        token = request.headers.get("X-Auth-Token")
         if token != os.getenv("ADMIN_TOKEN"):
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            raise HTTPException(status_code=401, detail="Admin unauthorized")
 
-    if role == "agent":
-        if token not in [os.getenv("ADMIN_TOKEN"), os.getenv("AGENT_TOKEN")]:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    elif role == "agent":
+        token = request.cookies.get("session")
+        if token not in [
+            os.getenv("ADMIN_TOKEN"),
+            os.getenv("AGENT_TOKEN")
+        ]:
+            raise HTTPException(status_code=401, detail="Agent unauthorized")
+
+    else:
+        raise HTTPException(status_code=403, detail="Invalid role")
