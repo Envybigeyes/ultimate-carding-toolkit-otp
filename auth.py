@@ -16,10 +16,7 @@ def require_role(request: Request, role: str):
 
     elif role == "agent":
         token = request.cookies.get("session")
-        if token not in [
-            os.getenv("ADMIN_TOKEN"),
-            os.getenv("AGENT_TOKEN")
-        ]:
+        if token not in [os.getenv("ADMIN_TOKEN"), os.getenv("AGENT_TOKEN")]:
             raise HTTPException(status_code=401, detail="Agent unauthorized")
 
     else:
