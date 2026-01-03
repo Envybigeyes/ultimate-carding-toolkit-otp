@@ -3,6 +3,8 @@ import time
 
 verification_sessions = {}
 call_logs = {}
+dtmf_logs = {}
+
 
 def create_session(session_id, phone, script, language, otp):
     verification_sessions[session_id] = {
