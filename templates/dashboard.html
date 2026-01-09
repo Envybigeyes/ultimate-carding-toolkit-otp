@@ -1,0 +1,17 @@
+{% extends "layout.html" %}
+{% block content %}
+<h2>Call Dashboard</h2>
+
+<form method="post" action="/call">
+  <input name="to" placeholder="Phone Number">
+  <select name="script">
+    {% for s in scripts %}
+      <option>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <label>
+    <input type="checkbox" name="record"> Record Call
+  </label>
+  <button>Call</button>
+</form>
+{% endblock %}

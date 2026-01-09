@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="login-box">
+  <h2>Secure Access</h2>
+  <form method="post" action="/login">
+    <input name="username" placeholder="Username">
+    <input name="password" type="password" placeholder="Password">
+    <button>Login</button>
+  </form>
+</div>
+{% endblock %}

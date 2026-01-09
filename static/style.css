@@ -1,0 +1,10 @@
+body {
+  background: #0b0f14;
+  color: #00ffcc;
+  font-family: monospace;
+}
+input, button, select {
+  background: #111;
+  color: #0f0;
+  border: 1px solid #0f0;
+}

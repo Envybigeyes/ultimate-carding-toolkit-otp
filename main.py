@@ -1,242 +1,101 @@
-# main.py
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse
-from scripts import SCRIPTS
-from storage import verification_sessions, call_logs, dtmf_logs, custom_scripts, activity_log
-from auth import require_role
-from ui import router as ui_router
-import uuid, time, os, io, csv
-import vonage
+from fastapi import FastAPI, Request, Form, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+from jose import jwt
+import uuid
+import os
+
+from auth import create_token, verify_token
+from vonage_client import voice
+from models import calls, scripts
+
+BASE_URL = os.getenv("BASE_URL")
+FROM_NUMBER = os.getenv("VONAGE_FROM_NUMBER")
 
 app = FastAPI()
-app.include_router(ui_router)
+templates = Jinja2Templates(directory="templates")
 
-MAX_OTP_ATTEMPTS = 3
-last_call_time = {}
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-def check_rate_limit(identifier: str, limit_seconds: int = 10):
-    current_time = time.time()
-    if identifier in last_call_time:
-        if current_time - last_call_time[identifier] < limit_seconds:
-            return False
-    last_call_time[identifier] = current_time
+# ---------------- LOGIN ----------------
+@app.get("/", response_class=HTMLResponse)
+def login_page(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
+
+@app.post("/login")
+def login(username: str = Form(...), password: str = Form(...)):
+    if username == "admin" and password == "admin":
+        token = create_token(username)
+        response = RedirectResponse("/dashboard", status_code=302)
+        response.set_cookie("token", token)
+        return response
+    return RedirectResponse("/", status_code=302)
+
+# ---------------- AUTH DEP ----------------
+def require_auth(request: Request):
+    token = request.cookies.get("token")
+    verify_token(token)
     return True
 
-def log_activity(action: str, details: str, user: str = "system"):
-    activity_log.append({
-        "timestamp": time.time(),
-        "action": action,
-        "details": details,
-        "user": user
+# ---------------- DASHBOARD ----------------
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request, auth=Depends(require_auth)):
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {"request": request, "scripts": scripts}
+    )
+
+# ---------------- CALL ----------------
+@app.post("/call")
+def start_call(
+    to: str = Form(...),
+    script: str = Form(...),
+    record: bool = Form(False),
+    auth=Depends(require_auth)
+):
+    call_id = str(uuid.uuid4())
+
+    response = voice.create_call({
+        "to": [{"type": "phone", "number": to}],
+        "from": {"type": "phone", "number": FROM_NUMBER},
+        "answer_url": [f"{BASE_URL}/answer/{call_id}"],
+        "event_url": [f"{BASE_URL}/event/{call_id}"],
+        "record": record,
     })
 
-def create_session(phone, otp, script, language):
-    session_id = str(uuid.uuid4())
-    verification_sessions[session_id] = {
-        "phone": phone,
-        "otp": otp,
-        "script": script,
-        "language": language,
-        "attempts": 0,
-        "verified": False,
-        "created_at": time.time()
+    calls[call_id] = {
+        "uuid": response["uuid"],
+        "dtmf": [],
+        "recording": None
     }
-    call_logs[session_id] = {
-        "phone": phone,
-        "script": script,
-        "language": language,
-        "otp": otp,
-        "result": "pending",
-        "status": "initializing",
-        "timestamp": time.time(),
-        "call_uuid": None
-    }
-    dtmf_logs[session_id] = []
-    log_activity("session_created", f"Session {session_id} for {phone}")
-    return session_id
 
-@app.post("/fraud/manual-call")
-async def manual_call(data: dict, request: Request):
-    require_role(request, "admin")
-    
-    if not check_rate_limit(data["phone"]):
-        raise HTTPException(status_code=429, detail="Please wait before making another call")
-    
-    session_id = create_session(
-        phone=data["phone"],
-        otp=data["otp"],
-        script=data.get("script", "capital_one"),
-        language=data.get("language", "en-US")
-    )
-    
-    try:
-        client = vonage.Client(
-            key=os.getenv("VONAGE_API_KEY"),
-            secret=os.getenv("VONAGE_API_SECRET")
-        )
-        voice = vonage.Voice(client)
-        
-        response = voice.create_call({
-            "to": [{"type": "phone", "number": data["phone"]}],
-            "from": {"type": "phone", "number": os.getenv("VONAGE_NUMBER")},
-            "answer_url": [f"https://{os.getenv('FLY_APP_NAME')}.fly.dev/answer?session_id={session_id}"]
-        })
-        
-        call_logs[session_id]["call_uuid"] = response.get("uuid")
-        call_logs[session_id]["status"] = "calling"
-        log_activity("call_initiated", f"Call to {data['phone']}")
-        
-        return {"status": "call_started", "session_id": session_id, "call_uuid": response.get("uuid")}
-    except Exception as e:
-        call_logs[session_id]["result"] = "error"
-        call_logs[session_id]["status"] = "failed"
-        log_activity("call_failed", f"Failed: {str(e)}")
-        return {"status": "error", "message": str(e), "session_id": session_id}
+    return RedirectResponse("/dashboard", 302)
 
-@app.get("/answer")
-async def answer(session_id: str):
-    s = verification_sessions.get(session_id)
-    if not s:
-        return JSONResponse([{"action": "talk", "text": "Session not found. Goodbye."}])
-    
-    if s["script"] in custom_scripts:
-        script = custom_scripts[s["script"]]["languages"].get(s["language"])
-    else:
-        script = SCRIPTS[s["script"]]["languages"][s["language"]]
-    
-    call_logs[session_id]["status"] = "answered"
-    
-    return JSONResponse([
-        {"action": "talk", "text": script["intro"]},
-        {"action": "talk", "text": script.get("recording", "This call may be recorded.")},
-        {"action": "input",
-         "maxDigits": 6,
-         "eventUrl": [f"https://{os.getenv('FLY_APP_NAME')}.fly.dev/input?session_id={session_id}"]}
-    ])
+# ---------------- ANSWER ----------------
+@app.api_route("/answer/{call_id}", methods=["GET", "POST"])
+def answer(call_id: str):
+    return [
+        {"action": "talk", "text": scripts.get("Default")},
+        {
+            "action": "input",
+            "eventUrl": [f"{BASE_URL}/dtmf/{call_id}"],
+            "maxDigits": 1
+        }
+    ]
 
-@app.post("/input")
-async def input(request: Request, session_id: str):
+# ---------------- DTMF ----------------
+@app.post("/dtmf/{call_id}")
+async def dtmf(call_id: str, request: Request):
     data = await request.json()
-    digits = data.get("dtmf", {}).get("digits", "")
-    s = verification_sessions.get(session_id)
-    
-    if not s:
-        return JSONResponse([{"action": "talk", "text": "Session not found."}])
-    
-    if s["script"] in custom_scripts:
-        script = custom_scripts[s["script"]]["languages"].get(s["language"])
-    else:
-        script = SCRIPTS[s["script"]]["languages"][s["language"]]
-    
-    dtmf_logs[session_id].append(digits)
+    digit = data["dtmf"]["digits"]
+    calls[call_id]["dtmf"].append(digit)
+    return {"ok": True}
 
-    if digits == s["otp"]:
-        s["verified"] = True
-        call_logs[session_id]["result"] = "otp_verified"
-        call_logs[session_id]["status"] = "verified"
-        return JSONResponse([
-            {"action": "talk", "text": script["menu"]},
-            {"action": "input",
-             "maxDigits": 1,
-             "eventUrl": [f"https://{os.getenv('FLY_APP_NAME')}.fly.dev/menu?session_id={session_id}"]}
-        ])
-
-    s["attempts"] += 1
-    if s["attempts"] >= MAX_OTP_ATTEMPTS:
-        call_logs[session_id]["result"] = "otp_failed"
-        call_logs[session_id]["status"] = "failed"
-        return JSONResponse([{"action": "talk", "text": script["fraud"]}])
-
-    return JSONResponse([
-        {"action": "talk", "text": script["retry"]},
-        {"action": "input",
-         "maxDigits": 6,
-         "eventUrl": [f"https://{os.getenv('FLY_APP_NAME')}.fly.dev/input?session_id={session_id}"]}
-    ])
-
-@app.post("/menu")
-async def menu(request: Request, session_id: str):
+# ---------------- EVENTS ----------------
+@app.post("/event/{call_id}")
+async def event(call_id: str, request: Request):
     data = await request.json()
-    digit = data.get("dtmf", {}).get("digits", "")
-    s = verification_sessions.get(session_id)
-    
-    if not s:
-        return JSONResponse([{"action": "talk", "text": "Session not found."}])
-    
-    if s["script"] in custom_scripts:
-        script = custom_scripts[s["script"]]["languages"].get(s["language"])
-    else:
-        script = SCRIPTS[s["script"]]["languages"][s["language"]]
-    
-    dtmf_logs[session_id].append(digit)
-
-    if digit == "1":
-        call_logs[session_id]["result"] = "confirmed"
-        msg = script["safe"]
-    elif digit == "2":
-        call_logs[session_id]["result"] = "fraud"
-        msg = script["fraud"]
-    elif digit == "9":
-        call_logs[session_id]["result"] = "escalated"
-        msg = script["escalate"]
-    else:
-        msg = script["retry"]
-
-    return JSONResponse([{"action": "talk", "text": msg}])
-
-@app.get("/api/sessions")
-async def get_sessions(request: Request):
-    require_role(request, "agent")
-    return {"sessions": call_logs, "dtmf": dtmf_logs}
-
-@app.get("/api/analytics")
-async def get_analytics(request: Request):
-    require_role(request, "agent")
-    total_calls = len(call_logs)
-    successful = sum(1 for log in call_logs.values() if log["result"] == "confirmed")
-    in_progress = sum(1 for log in call_logs.values() if log["status"] in ["calling", "active"])
-    return {
-        "total_calls": total_calls,
-        "successful": successful,
-        "in_progress": in_progress,
-        "success_rate": (successful / total_calls * 100) if total_calls > 0 else 0
-    }
-
-@app.post("/api/scripts/custom")
-async def add_custom_script(request: Request, data: dict):
-    require_role(request, "agent")
-    script_id = data.get("id") or str(uuid.uuid4())[:8]
-    custom_scripts[script_id] = data
-    log_activity("custom_script_added", f"Script {script_id} added")
-    return {"status": "success", "script_id": script_id}
-
-@app.get("/api/scripts")
-async def get_scripts(request: Request):
-    require_role(request, "agent")
-    return {**SCRIPTS, **custom_scripts}
-
-@app.get("/api/activity")
-async def get_activity(request: Request):
-    require_role(request, "agent")
-    return activity_log[-50:]
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "vonage_configured": bool(os.getenv("VONAGE_API_KEY")),
-        "active_sessions": len(call_logs)
-    }
-
-@app.get("/export-csv")
-async def export_csv():
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["session", "phone", "script", "language", "otp", "result", "status"])
-    writer.writeheader()
-    for k, v in call_logs.items():
-        writer.writerow({"session": k, "phone": v["phone"], "script": v["script"], "language": v["language"], "otp": v["otp"], "result": v["result"], "status": v.get("status", "unknown")})
-    return HTMLResponse(content=output.getvalue(), media_type="text/csv")
-
-@app.get("/")
-async def root():
-    return {"status": "Security Testing Framework Online"}
+    if data["type"] == "recording":
+        calls[call_id]["recording"] = data["recording_url"]
+    return {"ok": True}

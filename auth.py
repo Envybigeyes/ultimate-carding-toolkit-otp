@@ -1,23 +1,16 @@
-# auth.py
 import os
-from fastapi import Request, HTTPException
+from datetime import datetime, timedelta
+from jose import jwt
 
-def require_role(request: Request, role: str):
-    """
-    Roles:
-    - admin → X-Auth-Token header
-    - agent → session cookie
-    """
+JWT_SECRET = os.getenv("JWT_SECRET")
+ALGO = "HS256"
 
-    if role == "admin":
-        token = request.headers.get("X-Auth-Token")
-        if token != os.getenv("ADMIN_TOKEN"):
-            raise HTTPException(status_code=401, detail="Admin unauthorized")
+def create_token(username: str):
+    payload = {
+        "sub": username,
+        "exp": datetime.utcnow() + timedelta(hours=8)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=ALGO)
 
-    elif role == "agent":
-        token = request.cookies.get("session")
-        if token not in [os.getenv("ADMIN_TOKEN"), os.getenv("AGENT_TOKEN")]:
-            raise HTTPException(status_code=401, detail="Agent unauthorized")
-
-    else:
-        raise HTTPException(status_code=403, detail="Invalid role")
+def verify_token(token: str):
+    return jwt.decode(token, JWT_SECRET, algorithms=[ALGO])
