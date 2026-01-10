@@ -1,11 +1,20 @@
-{% extends "layout.html" %}
-{% block content %}
-<div class="login-box">
-  <h2>Secure Access</h2>
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Login</title>
+  <style>
+    body { background:#0b0f1a; color:#00ffe1; font-family:monospace; }
+    form { margin:100px auto; width:300px; }
+    input, button { width:100%; margin:10px 0; padding:10px; }
+  </style>
+</head>
+<body>
   <form method="post" action="/login">
-    <input name="username" placeholder="Username">
-    <input name="password" type="password" placeholder="Password">
-    <button>Login</button>
+    <h2>Secure Login</h2>
+    {% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+    <input name="username" placeholder="Username" required>
+    <input name="password" type="password" placeholder="Password" required>
+    <button type="submit">Login</button>
   </form>
-</div>
-{% endblock %}
+</body>
+</html>

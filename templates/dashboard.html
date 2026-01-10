@@ -1,17 +1,22 @@
-{% extends "layout.html" %}
-{% block content %}
-<h2>Call Dashboard</h2>
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Dashboard</title>
+  <style>
+    body { background:#05080f; color:#00ffcc; font-family:monospace; }
+    form { margin:50px auto; width:400px; }
+    input, button { width:100%; margin:10px 0; padding:10px; }
+  </style>
+</head>
+<body>
+  <h1>Ultimate Toolkit Dashboard</h1>
 
-<form method="post" action="/call">
-  <input name="to" placeholder="Phone Number">
-  <select name="script">
-    {% for s in scripts %}
-      <option>{{ s }}</option>
-    {% endfor %}
-  </select>
-  <label>
-    <input type="checkbox" name="record"> Record Call
-  </label>
-  <button>Call</button>
-</form>
-{% endblock %}
+  <form method="post" action="/call">
+    <input name="to" placeholder="Phone Number (+1...)" required>
+    <label>
+      <input type="checkbox" name="record"> Record Call
+    </label>
+    <button type="submit">Start Call</button>
+  </form>
+</body>
+</html>
